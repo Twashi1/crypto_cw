@@ -1,0 +1,23 @@
+Plaintext: 0123456789abcdef
+Key: 0000000000000000
+Ciphertext: 1b03106309d4565c
+======================================================================
+Plaintext: 0123456789abcdef
+Key: ffffffffffffffff
+Ciphertext: 3e0fd46fb452fe83
+======================================================================
+Plaintext: 0000000000000000
+Key: 0123456789abcdef
+Ciphertext: 1a8db1ce0ae235dd
+======================================================================
+Plaintext: 0123456789abcdef
+Key: 0123456789abcdef
+Ciphertext: 90bdd061ddf6c261
+======================================================================
+Plaintext: ffffffffffffffff
+Key: 0123456789abcdef
+Ciphertext: da0f1f303bb1bf3c
+======================================================================
+Plaintext: 00000000ffffffff
+Key: 0123456789abcdef
+Ciphertext: 0edc46ae2dc2011f
