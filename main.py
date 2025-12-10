@@ -8,13 +8,15 @@ Thomas Zarri
 
 import numpy as np
 import random
+import time
 
 class PaddingError(Exception):
     def __init__(self, message=None):
         super().__init__(message or "Padding error")
 
 INTERNAL_ORACLE_KEY = bytes.fromhex("deadbeef01234567")
-INTERNAL_IV = b"\0\0\0\0\0\0\0\0" # we pretend we know the IV as well
+INTERNAL_IV = bytes.fromhex("0000000000000000") # we pretend we know the IV as well
+INTERNAL_HASH_IV = bytes.fromhex("01234567beefdead")
 
 sbox = np.array([142, 79, 87, 120, 121, 106, 107, 92, 93, 80, 81, 114, 115, 148, 101, 134, 158, 95, 103, 136, 137, 122, 123, 108, 109, 96, 97, 130, 131, 164, 117, 150, 174, 111, 119, 152, 153, 138, 139, 124, 125, 112, 113, 146, 147, 180, 133, 166, 154, 155, 140, 141, 128, 129, 162, 163, 196, 149, 182, 190, 127, 135, 168, 169, 198, 206, 143, 151, 184, 185, 170, 171, 156, 157, 144, 145, 178, 179, 212, 165, 214, 222, 159, 167, 200, 201, 186, 187, 172, 173, 160, 161, 194, 195, 228, 181, 216, 217, 202, 203, 188, 189, 176, 177, 210, 211, 244, 197, 230, 238, 175, 183, 232, 233, 218, 219, 204, 205, 192, 193, 226, 227, 4, 213, 246, 254, 191, 199, 14, 207, 215, 248, 249, 234, 235, 220, 221, 208, 209, 242, 243, 20, 229, 6, 231, 8, 9, 250, 251, 236, 237, 224, 225, 2, 3, 36, 245, 22, 30, 223, 247, 24, 25, 10, 11, 252, 253, 240, 241, 18, 19, 52, 5, 38, 46, 239, 26, 27, 12, 13, 0, 1, 34, 35, 68, 21, 54, 62, 255, 7, 40, 41, 56, 57, 42, 43, 28, 29, 16, 17, 50, 51, 84, 37, 70, 78, 15, 23, 72, 73, 58, 59, 44, 45, 32, 33, 66, 67, 100, 53, 86, 94, 31, 39, 116, 69, 102, 110, 47, 55, 88, 89, 74, 75, 60, 61, 48, 49, 82, 83, 132, 85, 118, 126, 63, 71, 104, 105, 90, 91, 76, 77, 64, 65, 98, 99], dtype=np.uint8)
 
@@ -51,6 +53,12 @@ def _bytes_vuint8(x : bytes) -> np.ndarray:
 
 def _bytes_vuint64(x : bytes) -> np.ndarray:
     return np.frombuffer(x, dtype=">u8")
+
+def _vuint8_vuint16(x : np.ndarray) -> np.ndarray:
+    return x.view(">u2").copy()
+
+def _vuint16_vuint8(x : np.ndarray) -> np.ndarray:
+    return x.astype(">u2").view(np.uint8).copy()
 
 def _vuint8_vuint64(x : np.ndarray) -> np.ndarray:
     return x.view(">u8").copy()
@@ -212,10 +220,11 @@ def _decrypt_ecb(ciphertext : np.ndarray, key : np.uint64) -> np.ndarray:
     padded = _vuint64_vuint8(decrypted)
     plaintext = _unpad_pkcs7(padded)
 
-    return plaintext
+    return plaintext 
 
 def _encrypt_cbc(plaintext : np.ndarray, key : np.uint64) -> np.ndarray:
     iv = _bytes_uint64(INTERNAL_IV)
+    iv_block = _bytes_vuint64(INTERNAL_IV)
 
     padded = _pad_pkcs7(plaintext, 8)
     blocks = _vuint8_vuint64(padded)
@@ -229,12 +238,14 @@ def _encrypt_cbc(plaintext : np.ndarray, key : np.uint64) -> np.ndarray:
         encrypted_blocks[i] = encrypted_block
         prev = encrypted_block
 
-    return _vuint64_vuint8(encrypted_blocks)
+    return _vuint64_vuint8(np.concatenate([iv_block, encrypted_blocks]))
 
 def _decrypt_cbc(ciphertext : np.ndarray, key : np.uint64) -> np.ndarray:
-    iv = _bytes_uint64(INTERNAL_IV)
+    iv_blocks = _vuint8_vuint64(ciphertext)
 
-    blocks = _vuint8_vuint64(ciphertext)
+    iv = iv_blocks[0]
+    blocks = iv_blocks[1:].copy()
+
     num_blocks = blocks.size
     decrypted_blocks = np.empty_like(blocks, dtype=np.uint64)
 
@@ -265,7 +276,9 @@ def Encrypt_CBC(plaintext : bytes, key : bytes) -> bytes:
     return _vuint8_bytes(_encrypt_cbc(_convert_np_array(plaintext), _bytes_uint64(key)))
 
 def Decrypt_CBC(ciphertext : bytes, key : bytes) -> bytes:
+    # print(f"Cipher before: {ciphertext}")
     ciphertext = _convert_np_array(ciphertext)
+    # print(f"Cipher after : {_vuint8_bytes(ciphertext)}")
 
     if len(ciphertext) % 8 != 0:
         raise ValueError("ciphertext must be multiple of block size (8 bytes)")
@@ -329,28 +342,37 @@ def Hash(iv : bytes, m : bytes) -> bytes:
 
 
 def MAC(k : bytes, m : bytes) -> bytes:
-    m_hash = Hash(INTERNAL_IV, m)
-    # TODO: Encrypt_ECB and related functions should take key as bitstring
+    m_hash = Hash(INTERNAL_HASH_IV, m)
     t = Encrypt_ECB(m_hash, k)
 
     return t
 
 def Verify(k : bytes, m : bytes, t : bytes) -> bool:
     expected = MAC(k, m)
-    return expected == t
+
+    if len(t) != len(expected): return False
+
+    # NOTE: intentionally introducing a timing-based attack
+    for i, byte in enumerate(expected):
+        if byte != t[i]:
+            return False
+
+        time.sleep(0.03)
+
+    return True
 
 def AuthEncrypt(k : bytes, plaintext : bytes) -> bytes:
     t = MAC(k, plaintext)
     # NOTE: t is 16 bytes
-    # TODO: note append mode
     c = Encrypt_CBC(plaintext + t, k)
 
     return c
 
 # NOTE: requires python 3.10+
-# TODO: maybe don't bother if we require python version for this?
 def AuthDecrypt(k : bytes, ciphertext : bytes) -> bytes | bool:
+    # print(f"Cipher: {ciphertext}")
     plaintext_tag = Decrypt_CBC(ciphertext, k)
+    # print(len(plaintext_tag))
     # NOTE: tag is 16 bytes
     plaintext = plaintext_tag[:-16] 
     tag = plaintext_tag[-16:]
@@ -474,11 +496,11 @@ def _attack_oracle(ciphertext : np.ndarray) -> bool:
 
     return True
 
-def _recover_block(target_block, prev_block):
+def _recover_block(target_block, prev_block, oracle):
     recovered_bytes = np.zeros(8, dtype=np.uint8) # array of block_size bytes
 
     prev_block = _uint64_vuint8(prev_block)
-    crafted_prev = prev_block.copy() # mutable copy of prev block
+    crafted_prev = prev_block.copy()
 
     target_block = _uint64_vuint8(target_block)
 
@@ -494,7 +516,7 @@ def _recover_block(target_block, prev_block):
 
             chosen_ciphertext = np.concatenate([crafted_prev, target_block])
 
-            if _attack_oracle(chosen_ciphertext):
+            if oracle(chosen_ciphertext):
                 recovered_bytes[pos] = guess
                 break
 
@@ -504,23 +526,126 @@ def PaddingOracleAttack(ciphertext : bytes) -> bytes:
     ciphertext = _convert_np_array(ciphertext)
     ciphertext_blocks = _vuint8_vuint64(ciphertext)
 
-    plaintext_blocks = np.zeros(ciphertext_blocks.size + 1, dtype=np.uint64)
+    plaintext_blocks = np.zeros(ciphertext_blocks.size - 1, dtype=np.uint64)
     plaintext_block_count = 0
 
     num_blocks = ciphertext_blocks.size
+    iv_block = ciphertext_blocks[0]
 
-    first_block = _recover_block(ciphertext_blocks[0], _bytes_uint64(INTERNAL_IV))
+    # NOTE: we only need the IV to recover the first plaintext block, but we can recover everything else
+    #   without the IV
+
+    first_block = _recover_block(ciphertext_blocks[1], iv_block, _attack_oracle)
     plaintext_blocks[plaintext_block_count] = _vuint8_uint64(first_block)
     plaintext_block_count += 1
 
-    for i in range(1, num_blocks):
-        p = _recover_block(ciphertext_blocks[i], ciphertext_blocks[i - 1])
+    for i in range(2, num_blocks):
+        p = _recover_block(ciphertext_blocks[i], ciphertext_blocks[i - 1], _attack_oracle)
         plaintext_blocks[plaintext_block_count] = _vuint8_uint64(p)
         plaintext_block_count += 1
 
     plaintext = _vuint64_vuint8(plaintext_blocks)
 
     return _vuint8_bytes(plaintext)
+
+def _message_forgery_oracle_decrypt(ciphertext : bytes) -> bytes:
+    return AuthDecrypt(b"secretke", ciphertext)
+
+def _message_special_oracle(ciphertext : bytes) -> bytes:
+    try:
+        Decrypt_CBC(ciphertext, b"secretke")
+    except PaddingError:
+        return False
+
+    return True
+
+def _message_forgery_padding_oracle(ciphertext : np.ndarray) -> bytes:
+    try:
+        AuthDecrypt(b"secretke", _vuint8_bytes(ciphertext))
+    except PaddingError:
+        return False
+
+    # NOTE: we don't care about the validity of the MAC for this
+    return True
+
+def _cbc_r_attempt(plaintext : np.ndarray) -> np.ndarray:
+    plaintext = _vuint8_vuint64(plaintext)
+    n = plaintext.size
+    # NOTE: the first block is random bytes (or all 0s for us)
+    # so we cannot recover everything
+    # but if we control IV we can maybe?
+    ciphertext_blocks = np.zeros(n + 1, dtype=np.uint64)
+    # ciphertext_blocks[ciphertext_blocks.size - 1] = _bytes_uint64(INTERNAL_IV)
+    
+    for i in range(n, 0, -1):
+        # we differ from the paper here because recover block returns plaintext
+        # so we take the xor with the previous ciphertext block to get back to intermediate value
+        oracle_res = _vuint8_uint64(_recover_block(ciphertext_blocks[i], ciphertext_blocks[i - 1], _message_forgery_padding_oracle))
+        # NOTE: might need to be plaintext[i]?
+        ciphertext_blocks[i - 1] = plaintext[i - 1] ^ oracle_res
+
+    return _vuint64_vuint8(ciphertext_blocks)
+
+def MessageForgeryAttack2() -> bytes:
+    guessed_tag = np.zeros(16, dtype=np.uint8)
+    
+    # ASsume we have some forgery already
+    forged = b"forged_message_32_bytes_aaabbbcc"
+    actual_tag = _bytes_vuint8(MAC(b"secretke", forged))
+    plaintext_tag = np.concatenate([_bytes_vuint8(forged), actual_tag])
+    ciphertext = _cbc_r_attempt(_pad_pkcs7(plaintext_tag))
+
+    print(_vuint8_bytes(ciphertext).hex())
+    plaintext_pray = Decrypt_CBC(_vuint8_bytes(ciphertext), b"secretke")
+    print(f"Outplaint: {plaintext_pray.hex()}")
+    print(f"Plaintext: {forged.hex()}")
+
+    res = AuthDecrypt(b"secretke", ciphertext)
+
+    print(res)
+
+    return ciphertext
+
+def MessageForgeryAttack() -> bytes:
+    forged = b"forged_message_32_bytes_aaabbbcc"
+    guessed_tag = np.zeros(16, dtype=np.uint8)
+    actual_tag = _bytes_vuint8(MAC(b"secretke", forged))
+
+    correct, fail_byte = Verify(b"secretke", forged, actual_tag)
+    print(f"Should be correct; {correct}")
+
+    for i in range(16):
+        times_taken = np.zeros(256, dtype=np.float64)
+
+        # Warm it up first
+        for guess in range(20):
+            guessed_tag[i] = guess
+
+            Verify(b"secretke", forged, _vuint8_bytes(guessed_tag))
+
+        for guess in range(256):
+            guessed_tag[i] = guess
+
+            start_time = time.time_ns()
+            correct = Verify(b"secretke", forged, _vuint8_bytes(guessed_tag))
+            elapsed = time.time_ns() - start_time
+
+            times_taken[guess] = elapsed
+
+        likely_correct = np.argmax(times_taken)
+
+        guessed_tag[i] = likely_correct
+
+        if guessed_tag[i] != actual_tag[i]:
+            print(f"Made a mistake, idx {i}, real value was {actual_tag[i]} with timing {times_taken[actual_tag[i]]}, but got instead {guessed_tag[i]} timing {times_taken[guessed_tag[i]]}")
+
+            return b""
+
+        print(f"Guessed byte idx:{i}, to be {likely_correct}")
+
+    was_correct = Verify(b"secretke", forged, guessed_tag)
+
+    print(f"Was correct: {was_correct}")
 
 if __name__ == "__main__":
     # example_usage()
@@ -529,13 +654,17 @@ if __name__ == "__main__":
     # hash_function_runs(Hash)
     # test_auth()
 
-    ciphertext = Encrypt_CBC(bytes.fromhex("00112233aabbccddeeffaabbccddeeff"), INTERNAL_ORACLE_KEY)
+    # res = Encrypt_ECB(bytes.fromhex("0123456789abcdef"), bytes.fromhex("0000000000000000")) 
+    # print(res.hex())
+
+    MessageForgeryAttack2()
 
     # Padding oracle attack that retrieves plaintext
-    # requires IV
-    # requires ability to call Decrypt_CBC (with the correct key)
+    ciphertext = Encrypt_CBC(bytes.fromhex("00112233aabbccddeeffaabbccddeeff"), INTERNAL_ORACLE_KEY)
     res = PaddingOracleAttack(ciphertext)
-
     print(f"{res=}, {res.hex()}")
+
+    # MessageForgeryAttack()
+    # MessageForgeryAttack2()
 
     # example_usage()
